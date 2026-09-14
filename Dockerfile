@@ -13,12 +13,18 @@ RUN apt-get update \
 
 COPY manager.py /manager.py
 
-RUN chmod +x /manager.py
+RUN chmod +x /manager.py \
+    && mkdir -p /tmp/runner-manager \
+    && chown -R runner:runner /tmp/runner-manager
 
 USER runner
 
 WORKDIR /tmp
 
+ENV HOME=/tmp
+ENV TMPDIR=/tmp
+ENV TEMP=/tmp
+ENV TMP=/tmp
 ENV PYTHONUNBUFFERED=1
 
 ENTRYPOINT ["python3", "/manager.py"]
