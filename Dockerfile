@@ -9,25 +9,13 @@ RUN apt-get update \
         ca-certificates \
         curl \
         jq \
-        coreutils \
-        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
-# ------------------------------------------------------------
-# Keep the official runner installation as a READ-ONLY source.
-#
-# Deplexo may mount the container filesystem read-only at runtime,
-# so no runtime files will ever be created here.
-# ------------------------------------------------------------
-
+# Keep the official runner as a read-only source.
 RUN mkdir -p /opt/runner-source \
     && cp -a /home/runner/. /opt/runner-source/ \
     && chown -R runner:runner /opt/runner-source \
     && chmod -R a+rX /opt/runner-source
-
-# ------------------------------------------------------------
-# Manager
-# ------------------------------------------------------------
 
 COPY manager.py /manager.py
 
@@ -36,8 +24,6 @@ RUN chmod +x /manager.py \
 
 USER runner
 
-# IMPORTANT:
-# Runtime writable directory is /tmp.
 ENV RUNNER_MANAGER_DIR=/tmp/runner-manager
 ENV PYTHONUNBUFFERED=1
 
