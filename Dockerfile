@@ -9,33 +9,21 @@ RUN apt-get update \
         ca-certificates \
         curl \
         jq \
-        coreutils \
     && rm -rf /var/lib/apt/lists/*
-
-# ------------------------------------------------------------
-# Immutable runner source
-# ------------------------------------------------------------
 
 RUN mkdir -p /opt/runner-source \
     && cp -a /home/runner/. /opt/runner-source/ \
-    && chown -R runner:runner /opt/runner-source \
-    && chmod -R a+rX /opt/runner-source
-
-# ------------------------------------------------------------
-# Manager
-# ------------------------------------------------------------
+    && chown -R runner:runner /opt/runner-source
 
 COPY manager.py /manager.py
 
-RUN chmod 0755 /manager.py \
+RUN chmod 755 /manager.py \
     && chown runner:runner /manager.py
 
 USER runner
 
 ENV PYTHONUNBUFFERED=1
-
-# Deplexo writable area
-ENV RUNNER_MANAGER_DIR=/tmp/runner-manager
+ENV PORT=3000
 
 WORKDIR /tmp
 
