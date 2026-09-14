@@ -11,7 +11,7 @@ RUN apt-get update \
         jq \
     && rm -rf /var/lib/apt/lists/*
 
-# Keep the official runner as a read-only source.
+# Keep the official runner as an immutable source.
 RUN mkdir -p /opt/runner-source \
     && cp -a /home/runner/. /opt/runner-source/ \
     && chown -R runner:runner /opt/runner-source \
