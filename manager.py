@@ -16,18 +16,15 @@ import requests
 
 GITHUB_TOKEN = os.environ.get("GG_TOKEN")
 
-# Target repository where runners will be registered
 GITHUB_SCOPE = os.environ.get(
     "GITHUB_SCOPE",
     "kingking0020/mmm"
 )
 
-# Desired number of ONLINE runners
 TARGET_RUNNERS = int(
     os.environ.get("TARGET_RUNNERS", "15")
 )
 
-# Check interval in seconds
 CHECK_INTERVAL = int(
     os.environ.get("CHECK_INTERVAL", "15")
 )
@@ -37,8 +34,7 @@ RUNNER_LABELS = os.environ.get(
     "self-hosted,linux,x64,deplexo"
 )
 
-# Deplexo filesystem is read-only outside writable locations.
-# /tmp is writable.
+# Everything must be writable on Deplexo.
 BASE_DIR = Path(
     os.environ.get(
         "RUNNER_BASE_DIR",
@@ -46,9 +42,15 @@ BASE_DIR = Path(
     )
 )
 
+RUNNER_SOURCE = Path(
+    "/home/runner"
+)
+
 API_BASE = "https://api.github.com"
 
-REPO_API = f"{API_BASE}/repos/{GITHUB_SCOPE}"
+REPO_API = (
+    f"{API_BASE}/repos/{GITHUB_SCOPE}"
+)
 
 REGISTRATION_TOKEN_URL = (
     f"{REPO_API}/actions/runners/registration-token"
@@ -75,7 +77,11 @@ stop_event = threading.Event()
 # ============================================================
 
 def shutdown_handler(signum, frame):
-    print("\n[MANAGER] Shutdown requested...")
+
+    print(
+        "\n[MANAGER] Shutdown requested..."
+    )
+
     stop_event.set()
 
 
@@ -96,7 +102,9 @@ signal.signal(
 
 if not GITHUB_TOKEN:
 
-    print("[ERROR] GG_TOKEN is not set.")
+    print(
+        "[ERROR] GG_TOKEN is not set."
+    )
 
     raise SystemExit(1)
 
@@ -111,7 +119,7 @@ try:
 except Exception as e:
 
     print(
-        f"[ERROR] Cannot create runner directory: {e}"
+        f"[ERROR] Cannot create BASE_DIR: {e}"
     )
 
     raise SystemExit(1)
@@ -124,18 +132,19 @@ except Exception as e:
 def github_headers():
 
     return {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2026-03-10",
+        "Authorization": (
+            f"Bearer {GITHUB_TOKEN}"
+        ),
+        "Accept": (
+            "application/vnd.github+json"
+        ),
+        "X-GitHub-Api-Version": (
+            "2026-03-10"
+        ),
     }
 
 
 def get_online_runners():
-
-    """
-    Get the number of ONLINE runners
-    registered in the target repository.
-    """
 
     try:
 
@@ -165,18 +174,19 @@ def get_online_runners():
             []
         )
 
-        online_runners = [
+        online = [
             runner
             for runner in runners
             if runner.get("status") == "online"
         ]
 
         print(
-            f"[GITHUB] Registered: {len(runners)} | "
-            f"Online: {len(online_runners)}"
+            f"[GITHUB] Registered: "
+            f"{len(runners)} | "
+            f"Online: {len(online)}"
         )
 
-        return len(online_runners)
+        return len(online)
 
     except Exception as e:
 
@@ -188,10 +198,6 @@ def get_online_runners():
 
 
 def get_registration_token():
-
-    """
-    Get a temporary GitHub runner registration token.
-    """
 
     try:
 
@@ -239,14 +245,76 @@ def get_registration_token():
 
 
 # ============================================================
-# RUNNER
+# PREPARE RUNNER
+# ============================================================
+
+def prepare_runner_directory(
+    runner_dir
+):
+
+    """
+    Create an isolated writable copy of the
+    GitHub Actions runner.
+    """
+
+    try:
+
+        runner_dir.mkdir(
+            parents=True,
+            exist_ok=False
+        )
+
+        print(
+            f"[RUNNER] Copying runner files "
+            f"to {runner_dir}"
+        )
+
+        shutil.copytree(
+            RUNNER_SOURCE,
+            runner_dir,
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                "_diag",
+                "_work",
+                ".cache",
+                ".local"
+            )
+        )
+
+        # Writable runtime directories
+
+        (runner_dir / "_diag").mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        (runner_dir / "_work").mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "[ERROR] Failed to prepare runner "
+            f"directory: {e}"
+        )
+
+        shutil.rmtree(
+            runner_dir,
+            ignore_errors=True
+        )
+
+        return False
+
+
+# ============================================================
+# CREATE RUNNER
 # ============================================================
 
 def create_runner():
-
-    """
-    Create one ephemeral GitHub Actions runner.
-    """
 
     runner_id = uuid.uuid4().hex[:12]
 
@@ -259,33 +327,29 @@ def create_runner():
     )
 
     print()
-    print("=" * 50)
-    print("[RUNNER] Creating new runner")
+    print("=" * 55)
+
+    print(
+        "[RUNNER] Creating new runner"
+    )
+
     print(
         f"[RUNNER] Name: {runner_name}"
     )
+
     print(
         f"[RUNNER] Repo: {GITHUB_SCOPE}"
     )
-    print("=" * 50)
+
+    print("=" * 55)
 
     # --------------------------------------------------------
-    # Directory
+    # Prepare isolated writable directory
     # --------------------------------------------------------
 
-    try:
-
-        runner_dir.mkdir(
-            parents=True,
-            exist_ok=False
-        )
-
-    except Exception as e:
-
-        print(
-            "[ERROR] Cannot create runner directory: "
-            f"{e}"
-        )
+    if not prepare_runner_directory(
+        runner_dir
+    ):
 
         return False
 
@@ -305,36 +369,74 @@ def create_runner():
         return False
 
     # --------------------------------------------------------
-    # Configure runner
+    # Environment
     # --------------------------------------------------------
 
+    runner_env = os.environ.copy()
+
+    # Critical:
+    # HOME must be writable.
+
+    runner_env["HOME"] = str(
+        runner_dir
+    )
+
+    runner_env["RUNNER_HOME"] = str(
+        runner_dir
+    )
+
+    runner_env["DOTNET_CLI_HOME"] = str(
+        runner_dir
+    )
+
+    runner_env["TMPDIR"] = str(
+        runner_dir / "_tmp"
+    )
+
+    runner_env["TEMP"] = str(
+        runner_dir / "_tmp"
+    )
+
+    runner_env["TMP"] = str(
+        runner_dir / "_tmp"
+    )
+
+    (runner_dir / "_tmp").mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    # --------------------------------------------------------
+    # Configure
+    # --------------------------------------------------------
+
+    config_command = [
+
+        "./config.sh",
+
+        "--url",
+        f"https://github.com/{GITHUB_SCOPE}",
+
+        "--token",
+        token,
+
+        "--name",
+        runner_name,
+
+        "--labels",
+        RUNNER_LABELS,
+
+        "--work",
+        "_work",
+
+        "--ephemeral",
+
+        "--disableupdate",
+
+        "--unattended",
+    ]
+
     try:
-
-        config_command = [
-
-            "/home/runner/config.sh",
-
-            "--url",
-            f"https://github.com/{GITHUB_SCOPE}",
-
-            "--token",
-            token,
-
-            "--name",
-            runner_name,
-
-            "--labels",
-            RUNNER_LABELS,
-
-            "--work",
-            "_work",
-
-            "--ephemeral",
-
-            "--disableupdate",
-
-            "--unattended",
-        ]
 
         print(
             f"[RUNNER] Registering "
@@ -346,6 +448,8 @@ def create_runner():
             config_command,
 
             cwd=runner_dir,
+
+            env=runner_env,
 
             stdout=subprocess.PIPE,
 
@@ -374,16 +478,10 @@ def create_runner():
 
             return False
 
-        print(
-            f"[RUNNER] {runner_name} "
-            "registered successfully."
-        )
-
     except subprocess.TimeoutExpired:
 
         print(
-            f"[ERROR] Runner registration timeout: "
-            f"{runner_name}"
+            "[ERROR] Runner configuration timeout."
         )
 
         shutil.rmtree(
@@ -396,8 +494,7 @@ def create_runner():
     except Exception as e:
 
         print(
-            f"[ERROR] Runner configuration failed: "
-            f"{e}"
+            f"[ERROR] Runner configuration error: {e}"
         )
 
         shutil.rmtree(
@@ -406,6 +503,11 @@ def create_runner():
         )
 
         return False
+
+    print(
+        f"[RUNNER] {runner_name} "
+        "registered successfully."
+    )
 
     # --------------------------------------------------------
     # Start runner
@@ -416,10 +518,12 @@ def create_runner():
         process = subprocess.Popen(
 
             [
-                "/home/runner/run.sh"
+                "./run.sh"
             ],
 
             cwd=runner_dir,
+
+            env=runner_env,
 
             stdout=subprocess.PIPE,
 
@@ -433,7 +537,7 @@ def create_runner():
     except Exception as e:
 
         print(
-            f"[ERROR] Failed to start runner "
+            f"[ERROR] Failed to start "
             f"{runner_name}: {e}"
         )
 
@@ -445,7 +549,7 @@ def create_runner():
         return False
 
     # --------------------------------------------------------
-    # Store local runner
+    # Save process
     # --------------------------------------------------------
 
     with lock:
@@ -464,7 +568,7 @@ def create_runner():
     )
 
     # --------------------------------------------------------
-    # Monitor runner
+    # Monitor
     # --------------------------------------------------------
 
     def monitor():
@@ -495,7 +599,6 @@ def create_runner():
 
         finally:
 
-            print()
             print(
                 f"[RUNNER] {runner_name} stopped."
             )
@@ -507,10 +610,6 @@ def create_runner():
                     None
                 )
 
-            # Ephemeral runner is normally
-            # automatically removed by GitHub
-            # after it processes one job.
-
             shutil.rmtree(
                 runner_dir,
                 ignore_errors=True
@@ -521,10 +620,8 @@ def create_runner():
             )
 
     thread = threading.Thread(
-
         target=monitor,
-
-        daemon=True,
+        daemon=True
     )
 
     thread.start()
@@ -533,7 +630,7 @@ def create_runner():
 
 
 # ============================================================
-# LOCAL RUNNER COUNT
+# LOCAL COUNT
 # ============================================================
 
 def local_runner_count():
@@ -546,7 +643,7 @@ def local_runner_count():
 
 
 # ============================================================
-# RECONCILIATION
+# RECONCILE
 # ============================================================
 
 def ensure_target_count():
@@ -566,39 +663,25 @@ def ensure_target_count():
 
     print(
         f"[MANAGER] GitHub online={online} | "
-        f"local processes={local} | "
+        f"local={local} | "
         f"target={TARGET_RUNNERS}"
     )
-
-    # --------------------------------------------------------
-    # Target already reached
-    # --------------------------------------------------------
 
     if online >= TARGET_RUNNERS:
 
         print(
-            "[MANAGER] Target reached. "
-            "No new runners needed."
+            "[MANAGER] Target reached."
         )
 
         return
-
-    # --------------------------------------------------------
-    # Calculate missing runners
-    # --------------------------------------------------------
 
     missing = (
         TARGET_RUNNERS - online
     )
 
     print(
-        f"[MANAGER] Missing {missing} "
-        "runner(s)."
+        f"[MANAGER] Missing {missing} runner(s)."
     )
-
-    # --------------------------------------------------------
-    # Create missing runners
-    # --------------------------------------------------------
 
     for i in range(missing):
 
@@ -607,44 +690,35 @@ def ensure_target_count():
             break
 
         print(
-            f"[MANAGER] Creating replacement "
+            f"[MANAGER] Creating "
             f"{i + 1}/{missing}"
         )
 
-        success = create_runner()
-
-        if not success:
-
-            print(
-                "[MANAGER] Runner creation failed."
-            )
-
-        # Small delay so GitHub has time
-        # to process registrations.
+        create_runner()
 
         time.sleep(1)
 
 
 # ============================================================
-# STARTUP
+# START
 # ============================================================
 
 print()
 
-print("=" * 55)
+print("=" * 60)
 
 print(
     "       DEPLEXO GITHUB RUNNER MANAGER"
 )
 
-print("=" * 55)
+print("=" * 60)
 
 print(
     f"Target repo : {GITHUB_SCOPE}"
 )
 
 print(
-    f"Target      : {TARGET_RUNNERS} runners"
+    f"Target      : {TARGET_RUNNERS}"
 )
 
 print(
@@ -656,16 +730,16 @@ print(
 )
 
 print(
-    f"Runner dir  : {BASE_DIR}"
+    f"Base dir    : {BASE_DIR}"
 )
 
-print("=" * 55)
+print("=" * 60)
 
 print()
 
 
 # ============================================================
-# INITIAL RECONCILIATION
+# INITIAL CHECK
 # ============================================================
 
 print(
@@ -685,13 +759,9 @@ while not stop_event.is_set():
 
         print()
 
-        print("=" * 55)
-
         print(
             "[MANAGER] Checking runner count..."
         )
-
-        print("=" * 55)
 
         ensure_target_count()
 
@@ -723,11 +793,9 @@ with lock:
 
 for runner in processes:
 
-    process = runner["process"]
-
     try:
 
-        process.terminate()
+        runner["process"].terminate()
 
     except Exception:
 
