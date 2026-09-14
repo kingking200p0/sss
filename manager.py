@@ -2,356 +2,169 @@ import os
 import time
 import requests
 
+GG_TOKEN = os.environ["GG_TOKEN"]
 
-# ============================================================
-# CONFIG
-# ============================================================
+OWNER = "kingking0020"
+REPO = "mmm"
+WORKFLOW = "screenshot.yml"
+BRANCH = "main"
 
-TOKEN = os.environ["GG_TOKEN"]
-
-OWNER = os.environ.get(
-    "GITHUB_OWNER",
-    "kingking0020",
-)
-
-REPO = os.environ.get(
-    "GITHUB_REPO",
-    "mmm",
-)
-
-WORKFLOW = os.environ.get(
-    "WORKFLOW",
-    "machine.yml",
-)
-
-BRANCH = os.environ.get(
-    "BRANCH",
-    "main",
-)
-
-TARGET = int(
-    os.environ.get(
-        "TARGET",
-        "15",
-    )
-)
-
-CHECK_INTERVAL = int(
-    os.environ.get(
-        "CHECK_INTERVAL",
-        "30",
-    )
-)
-
-
-# ============================================================
-# GITHUB API
-# ============================================================
+CHECK_INTERVAL = 40
 
 API = "https://api.github.com"
 
 HEADERS = {
-    "Authorization": f"Bearer {TOKEN}",
     "Accept": "application/vnd.github+json",
-    "X-GitHub-Api-Version": "2026-03-10",
-}
-
-session = requests.Session()
-session.headers.update(HEADERS)
-
-
-# ============================================================
-# ACTIVE STATUSES
-# ============================================================
-
-ACTIVE_STATUSES = {
-    "queued",
-    "in_progress",
-    "requested",
-    "waiting",
-    "pending",
+    "Authorization": f"Bearer {GG_TOKEN}",
+    "X-GitHub-Api-Version": "2022-11-28",
 }
 
 
-# ============================================================
-# GET ACTIVE WORKFLOW RUNS
-# ============================================================
+def dispatch_workflow():
+    url = f"{API}/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW}/dispatches"
 
-def get_active_runs():
-    url = (
-        f"{API}/repos/"
-        f"{OWNER}/{REPO}/actions/workflows/"
-        f"{WORKFLOW}/runs"
+    response = requests.post(
+        url,
+        headers=HEADERS,
+        json={"ref": BRANCH},
+        timeout=30,
     )
 
-    try:
-        response = session.get(
-            url,
-            params={
-                "per_page": 100,
-            },
-            timeout=20,
-        )
+    if response.status_code not in (200, 201, 204):
+        print(f"[ERROR] Dispatch failed: HTTP {response.status_code}")
+        print(response.text)
+        return False
 
-        if response.status_code != 200:
-            print(
-                f"[ERROR] Cannot get workflow runs: "
-                f"HTTP {response.status_code}",
-                flush=True,
-            )
-            print(
-                response.text[:500],
-                flush=True,
-            )
-            return None
+    print("[START] Workflow dispatched.")
+    return True
 
-        data = response.json()
 
-        runs = data.get(
-            "workflow_runs",
-            [],
-        )
+def get_latest_run():
+    url = f"{API}/repos/{OWNER}/{REPO}/actions/workflows/{WORKFLOW}/runs"
 
-        active = [
-            run
-            for run in runs
-            if run.get("status") in ACTIVE_STATUSES
-        ]
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        params={
+            "branch": BRANCH,
+            "per_page": 1,
+        },
+        timeout=30,
+    )
 
-        print(
-            f"[GITHUB] "
-            f"Workflow={WORKFLOW} | "
-            f"Active={len(active)}",
-            flush=True,
-        )
-
-        return len(active)
-
-    except Exception as e:
-        print(
-            f"[ERROR] get_active_runs(): {e}",
-            flush=True,
-        )
+    if response.status_code != 200:
+        print(f"[ERROR] Cannot get workflow runs: HTTP {response.status_code}")
+        print(response.text)
         return None
 
+    runs = response.json().get("workflow_runs", [])
 
-# ============================================================
-# DISPATCH ONE WORKFLOW
-# ============================================================
+    if not runs:
+        return None
 
-def dispatch_one(number):
-    url = (
-        f"{API}/repos/"
-        f"{OWNER}/{REPO}/actions/workflows/"
-        f"{WORKFLOW}/dispatches"
+    return runs[0]
+
+
+def wait_for_new_run(previous_id):
+    while True:
+        run = get_latest_run()
+
+        if run and run["id"] != previous_id:
+            return run
+
+        time.sleep(2)
+
+
+def get_run(run_id):
+    url = f"{API}/repos/{OWNER}/{REPO}/actions/runs/{run_id}"
+
+    response = requests.get(
+        url,
+        headers=HEADERS,
+        timeout=30,
     )
 
-    payload = {
-        "ref": BRANCH,
-    }
-
-    try:
-        response = session.post(
-            url,
-            json=payload,
-            timeout=20,
+    if response.status_code != 200:
+        print(
+            f"[ERROR] Cannot get Run {run_id}: "
+            f"HTTP {response.status_code}"
         )
+        print(response.text)
+        return None
 
-        if response.status_code in (200, 204):
+    return response.json()
+
+
+def main():
+    print("=" * 60)
+    print("       SINGLE GITHUB ACTION MANAGER")
+    print("=" * 60)
+    print(f"Repository : {OWNER}/{REPO}")
+    print(f"Workflow   : {WORKFLOW}")
+    print(f"Branch     : {BRANCH}")
+    print(f"Check      : every {CHECK_INTERVAL}s")
+    print("=" * 60)
+
+    previous_run_id = None
+
+    while True:
+
+        # 1. Start ONE workflow
+        print("[MANAGER] Starting one workflow...")
+
+        if not dispatch_workflow():
+            print("[MANAGER] Dispatch failed. Retrying in 10s...")
+            time.sleep(10)
+            continue
+
+        # 2. Find exactly the newly created Run
+        new_run = wait_for_new_run(previous_run_id)
+        run_id = new_run["id"]
+
+        previous_run_id = run_id
+
+        print(f"[MANAGER] Tracking Run: {run_id}")
+
+        # 3. Check this Run every 40 seconds
+        while True:
+
+            run = get_run(run_id)
+
+            if run is None:
+                print(
+                    f"[MANAGER] Status unavailable. "
+                    f"Retrying in {CHECK_INTERVAL}s..."
+                )
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            status = run.get("status")
+            conclusion = run.get("conclusion")
+
             print(
-                f"[START] Machine {number} dispatched",
-                flush=True,
+                f"[CHECK] Run {run_id} | "
+                f"status={status} | "
+                f"conclusion={conclusion}"
             )
-            return True
 
-        print(
-            f"[ERROR] Machine {number} failed: "
-            f"HTTP {response.status_code}",
-            flush=True,
-        )
-        print(
-            response.text[:500],
-            flush=True,
-        )
+            # Still running/queued
+            if status != "completed":
+                print(
+                    f"[MANAGER] Run still active. "
+                    f"Next check in {CHECK_INTERVAL}s..."
+                )
+                time.sleep(CHECK_INTERVAL)
+                continue
 
-        return False
+            # 4. Run finished
+            print(
+                f"[MANAGER] Run {run_id} completed "
+                f"with result: {conclusion}"
+            )
 
-    except Exception as e:
-        print(
-            f"[ERROR] dispatch_one(): {e}",
-            flush=True,
-        )
-        return False
+            # 5. Break -> outer loop starts exactly ONE new workflow
+            break
 
 
-# ============================================================
-# START EXACTLY N MACHINES
-# ============================================================
-
-def start_machines(count):
-    if count <= 0:
-        return
-
-    print(
-        f"[MANAGER] Starting {count} machine(s)...",
-        flush=True,
-    )
-
-    success = 0
-
-    for i in range(1, count + 1):
-        if dispatch_one(i):
-            success += 1
-
-        # Avoid sending all requests at exactly the same time.
-        time.sleep(1)
-
-    print(
-        f"[MANAGER] Started "
-        f"{success}/{count}",
-        flush=True,
-    )
-
-
-# ============================================================
-# INITIAL START
-# ============================================================
-
-def initial_start():
-    print(
-        "[MANAGER] Initial startup: "
-        f"starting {TARGET} machines...",
-        flush=True,
-    )
-
-    start_machines(TARGET)
-
-
-# ============================================================
-# REPLENISH
-# ============================================================
-
-def replenish():
-    active = get_active_runs()
-
-    if active is None:
-        print(
-            "[MANAGER] Could not determine "
-            "active machine count.",
-            flush=True,
-        )
-        return
-
-    print(
-        f"[MANAGER] Active={active}/{TARGET}",
-        flush=True,
-    )
-
-    if active >= TARGET:
-        print(
-            "[MANAGER] Target reached. "
-            "Nothing to do.",
-            flush=True,
-        )
-        return
-
-    missing = TARGET - active
-
-    print(
-        f"[MANAGER] {missing} machine(s) missing.",
-        flush=True,
-    )
-
-    start_machines(missing)
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-print(
-    "==========================================",
-    flush=True,
-)
-
-print(
-    "       GITHUB MACHINE MANAGER",
-    flush=True,
-)
-
-print(
-    "==========================================",
-    flush=True,
-)
-
-print(
-    f"Repository : {OWNER}/{REPO}",
-    flush=True,
-)
-
-print(
-    f"Workflow   : {WORKFLOW}",
-    flush=True,
-)
-
-print(
-    f"Branch     : {BRANCH}",
-    flush=True,
-)
-
-print(
-    f"Target     : {TARGET}",
-    flush=True,
-)
-
-print(
-    f"Check      : {CHECK_INTERVAL}s",
-    flush=True,
-)
-
-print(
-    "==========================================",
-    flush=True,
-)
-
-
-# ============================================================
-# STEP 1
-# FIRST START 15
-# ============================================================
-
-initial_start()
-
-
-# ============================================================
-# STEP 2
-# CHECK EVERY 30 SECONDS
-# ============================================================
-
-while True:
-    print(
-        "\n[MANAGER] Waiting "
-        f"{CHECK_INTERVAL}s...",
-        flush=True,
-    )
-
-    time.sleep(
-        CHECK_INTERVAL
-    )
-
-    print(
-        "\n==========================================",
-        flush=True,
-    )
-
-    print(
-        "[MANAGER] Periodic check",
-        flush=True,
-    )
-
-    print(
-        "==========================================",
-        flush=True,
-    )
-
-    replenish()
+if __name__ == "__main__":
+    main()
