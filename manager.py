@@ -17,6 +17,8 @@ import requests
 
 GITHUB_TOKEN = os.environ.get("GG_TOKEN")
 
+# Target repository.
+# The manager project itself is NOT deployed here.
 GITHUB_SCOPE = os.environ.get(
     "GITHUB_SCOPE",
     "kingking0020/mmm",
@@ -27,7 +29,7 @@ TARGET_RUNNERS = int(
 )
 
 CHECK_INTERVAL = int(
-    os.environ.get("CHECK_INTERVAL", "20")
+    os.environ.get("CHECK_INTERVAL", "15")
 )
 
 MAX_CREATING = int(
@@ -44,7 +46,7 @@ RUNNER_LABELS = os.environ.get(
 )
 
 PORT = int(
-    os.environ.get("PORT", "8080")
+    os.environ.get("PORT", "3000")
 )
 
 
@@ -52,19 +54,16 @@ PORT = int(
 # PATHS
 # ============================================================
 
-# IMPORTANT:
-# Deplexo filesystem is writable only in /tmp.
+# Deplexo runtime writable area.
 MANAGER_DIR = Path(
     "/tmp/runner-manager"
 )
 
 RUNNERS_DIR = (
-    MANAGER_DIR /
-    "runners"
+    MANAGER_DIR / "runners"
 )
 
-# Official runner installation inside image.
-# It is READ-ONLY at runtime.
+# Read-only official runner installation.
 SOURCE_DIR = Path(
     "/opt/runner-source"
 )
@@ -126,7 +125,7 @@ signal.signal(
 
 
 # ============================================================
-# TOKEN VALIDATION
+# TOKEN CHECK
 # ============================================================
 
 if not GITHUB_TOKEN:
@@ -135,11 +134,10 @@ if not GITHUB_TOKEN:
 
 
 # ============================================================
-# CREATE WRITABLE RUNTIME DIR
+# WRITABLE RUNTIME DIRECTORY
 # ============================================================
 
 try:
-
     MANAGER_DIR.mkdir(
         parents=True,
         exist_ok=True,
@@ -153,7 +151,7 @@ try:
 except Exception as e:
 
     print(
-        "[ERROR] Cannot create runtime directory:"
+        "[ERROR] Could not create runtime directory:"
     )
 
     print(
@@ -167,9 +165,7 @@ except Exception as e:
 # HEALTH SERVER
 # ============================================================
 
-class HealthHandler(
-    BaseHTTPRequestHandler
-):
+class HealthHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
 
@@ -177,7 +173,7 @@ class HealthHandler(
 
         self.send_header(
             "Content-Type",
-            "text/plain; charset=utf-8",
+            "text/plain",
         )
 
         self.end_headers()
@@ -186,12 +182,8 @@ class HealthHandler(
             b"OK\n"
         )
 
-    def log_message(
-        self,
-        format,
-        *args,
-    ):
-        pass
+    def log_message(self, format, *args):
+        return
 
 
 def start_health_server():
@@ -236,21 +228,15 @@ session = requests.Session()
 
 session.headers.update(
     {
-        "Authorization": (
-            f"Bearer {GITHUB_TOKEN}"
-        ),
-        "Accept": (
-            "application/vnd.github+json"
-        ),
-        "X-GitHub-Api-Version": (
-            "2026-03-10"
-        ),
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
     }
 )
 
 
 # ============================================================
-# GITHUB RUNNERS
+# GET ONLINE RUNNERS
 # ============================================================
 
 def get_online_runners():
@@ -260,7 +246,7 @@ def get_online_runners():
         response = session.get(
             RUNNERS_URL,
             params={
-                "per_page": 100
+                "per_page": 100,
             },
             timeout=20,
         )
@@ -285,17 +271,19 @@ def get_online_runners():
 
         runners = data.get(
             "runners",
-            []
+            [],
         )
 
         online = [
-            r for r in runners
-            if r.get("status") == "online"
+            runner
+            for runner in runners
+            if runner.get("status") == "online"
         ]
 
         busy = [
-            r for r in online
-            if r.get("busy") is True
+            runner
+            for runner in online
+            if runner.get("busy") is True
         ]
 
         print(
@@ -316,7 +304,7 @@ def get_online_runners():
 
 
 # ============================================================
-# REGISTRATION TOKEN
+# GET REGISTRATION TOKEN
 # ============================================================
 
 def get_registration_token():
@@ -328,10 +316,7 @@ def get_registration_token():
             timeout=20,
         )
 
-        if response.status_code not in (
-            200,
-            201,
-        ):
+        if response.status_code not in (200, 201):
 
             print(
                 "[ERROR] Registration token failed:"
@@ -373,16 +358,22 @@ def get_registration_token():
 
 
 # ============================================================
-# CHECK RUNNER SOURCE
+# VALIDATE SOURCE
 # ============================================================
 
 def validate_source():
 
-    required = [
+    required_files = [
         "config.sh",
         "run.sh",
         "env.sh",
+        "run-helper.sh.template",
+        "safe_sleep.sh",
+    ]
+
+    required_dirs = [
         "bin",
+        "externals",
     ]
 
     print(
@@ -392,22 +383,31 @@ def validate_source():
     if not SOURCE_DIR.exists():
 
         print(
-            f"[ERROR] Source not found: {SOURCE_DIR}"
+            f"[ERROR] Runner source missing: {SOURCE_DIR}"
         )
 
         return False
 
-    for name in required:
+    for name in required_files:
 
-        path = (
-            SOURCE_DIR /
-            name
-        )
+        path = SOURCE_DIR / name
 
-        if not path.exists():
+        if not path.is_file():
 
             print(
-                f"[ERROR] Missing: {path}"
+                f"[ERROR] Missing runner file: {path}"
+            )
+
+            return False
+
+    for name in required_dirs:
+
+        path = SOURCE_DIR / name
+
+        if not path.is_dir():
+
+            print(
+                f"[ERROR] Missing runner directory: {path}"
             )
 
             return False
@@ -420,29 +420,46 @@ def validate_source():
 
 
 # ============================================================
-# CREATE PER-RUNNER TREE
+# MAKE EXECUTABLE
+# ============================================================
+
+def make_executable(path: Path):
+
+    try:
+
+        mode = path.stat().st_mode
+
+        path.chmod(
+            mode | 0o111
+        )
+
+    except Exception:
+        pass
+
+
+# ============================================================
+# CREATE RUNNER DIRECTORY
 # ============================================================
 
 def create_runner_tree(
-    runner_dir: Path
+    runner_dir: Path,
 ):
+
     """
     IMPORTANT:
 
-    DO NOT:
-        cp
-        cp -a
-        hard-link
+    We DO NOT symlink shell scripts.
 
-    between /opt and /tmp.
+    config.sh/run.sh/env.sh resolve their own location.
+    Therefore they must physically exist inside runner_dir.
 
-    /opt and /tmp are different filesystems in Deplexo.
+    Large immutable directories:
+        bin
+        externals
 
-    Instead:
-        - static files -> symlink
-        - static directories -> symlink
-        - mutable runtime files -> local
-        - work/log/temp -> local
+    are symlinked to /opt/runner-source.
+
+    Small script files are copied locally.
     """
 
     try:
@@ -453,53 +470,92 @@ def create_runner_tree(
         )
 
         # ----------------------------------------------------
-        # Create symlink for every static runner item.
-        #
-        # This consumes almost no writable storage.
+        # COPY SMALL RUNNER FILES LOCALLY
         # ----------------------------------------------------
 
-        for source_item in SOURCE_DIR.iterdir():
+        local_files = [
+            "config.sh",
+            "run.sh",
+            "env.sh",
+            "run-helper.sh.template",
+            "safe_sleep.sh",
+        ]
 
-            name = source_item.name
+        for name in local_files:
 
-            # ------------------------------------------------
-            # These MUST be local/writable.
-            # ------------------------------------------------
-
-            if name in {
-                "_work",
-                "_diag",
-                "_temp",
-                "home",
-                "_tool_cache",
-                ".runner",
-                ".credentials",
-                ".credentials_rsaparams",
-                ".credentials_rsakey",
-                ".env",
-                ".path",
-            }:
-                continue
-
-            destination = (
-                runner_dir /
-                name
+            source = (
+                SOURCE_DIR / name
             )
 
-            try:
+            destination = (
+                runner_dir / name
+            )
 
-                # Everything else is static and shared.
-                os.symlink(
-                    source_item,
-                    destination,
-                    target_is_directory=source_item.is_dir(),
-                )
+            shutil.copy2(
+                source,
+                destination,
+            )
 
-            except FileExistsError:
-                pass
+            make_executable(
+                destination
+            )
 
         # ----------------------------------------------------
-        # Writable directories
+        # OPTIONAL SCRIPTS
+        # ----------------------------------------------------
+
+        optional_files = [
+            "runsvc.sh",
+            "svc.sh",
+            "run-helper.cmd.template",
+        ]
+
+        for name in optional_files:
+
+            source = (
+                SOURCE_DIR / name
+            )
+
+            if source.is_file():
+
+                destination = (
+                    runner_dir / name
+                )
+
+                shutil.copy2(
+                    source,
+                    destination,
+                )
+
+                make_executable(
+                    destination
+                )
+
+        # ----------------------------------------------------
+        # LARGE STATIC DIRECTORIES
+        # ----------------------------------------------------
+
+        for name in [
+            "bin",
+            "externals",
+        ]:
+
+            source = (
+                SOURCE_DIR / name
+            )
+
+            destination = (
+                runner_dir / name
+            )
+
+            os.symlink(
+                source,
+                destination,
+                target_is_directory=True,
+            )
+
+        # ----------------------------------------------------
+        # LOCAL WRITABLE DIRECTORIES
         # ----------------------------------------------------
 
         for name in [
@@ -511,20 +567,18 @@ def create_runner_tree(
         ]:
 
             (
-                runner_dir /
-                name
+                runner_dir / name
             ).mkdir(
                 parents=True,
                 exist_ok=True,
             )
 
         # ----------------------------------------------------
-        # Writable HOME
+        # HOME
         # ----------------------------------------------------
 
         home = (
-            runner_dir /
-            "home"
+            runner_dir / "home"
         )
 
         for name in [
@@ -535,8 +589,7 @@ def create_runner_tree(
         ]:
 
             (
-                home /
-                name
+                home / name
             ).mkdir(
                 parents=True,
                 exist_ok=True,
@@ -563,26 +616,23 @@ def create_runner_tree(
 
 
 # ============================================================
-# ENVIRONMENT
+# RUNNER ENVIRONMENT
 # ============================================================
 
 def runner_environment(
-    runner_dir: Path
+    runner_dir: Path,
 ):
 
     home = (
-        runner_dir /
-        "home"
+        runner_dir / "home"
     )
 
     temp = (
-        runner_dir /
-        "_temp"
+        runner_dir / "_temp"
     )
 
     tool_cache = (
-        runner_dir /
-        "_tool_cache"
+        runner_dir / "_tool_cache"
     )
 
     env = os.environ.copy()
@@ -590,9 +640,7 @@ def runner_environment(
     env["HOME"] = str(home)
 
     env["TMPDIR"] = str(temp)
-
     env["TMP"] = str(temp)
-
     env["TEMP"] = str(temp)
 
     env["RUNNER_TEMP"] = str(temp)
@@ -606,19 +654,15 @@ def runner_environment(
     )
 
     env["XDG_CACHE_HOME"] = str(
-        home /
-        ".cache"
+        home / ".cache"
     )
 
     env["XDG_CONFIG_HOME"] = str(
-        home /
-        ".config"
+        home / ".config"
     )
 
     env["XDG_DATA_HOME"] = str(
-        home /
-        ".local" /
-        "share"
+        home / ".local" / "share"
     )
 
     return env
@@ -656,7 +700,7 @@ def cleanup_runner(
 
 
 # ============================================================
-# CREATE RUNNER
+# CREATE + START RUNNER
 # ============================================================
 
 def create_runner():
@@ -693,7 +737,7 @@ def create_runner():
     )
 
     print(
-        f"[RUNNER] Dir:  {runner_dir}"
+        f"[RUNNER] Dir: {runner_dir}"
     )
 
     print(
@@ -703,7 +747,7 @@ def create_runner():
     try:
 
         # ----------------------------------------------------
-        # Get token
+        # TOKEN
         # ----------------------------------------------------
 
         token = get_registration_token()
@@ -715,11 +759,11 @@ def create_runner():
             return False
 
         # ----------------------------------------------------
-        # Build lightweight runner directory
+        # FILESYSTEM
         # ----------------------------------------------------
 
         print(
-            "[RUNNER] Creating symlink-based filesystem..."
+            "[RUNNER] Creating runner filesystem..."
         )
 
         if not create_runner_tree(
@@ -735,18 +779,17 @@ def create_runner():
         )
 
         # ----------------------------------------------------
-        # Verify config.sh
+        # TEST THAT CONFIG.SH IS PHYSICALLY LOCAL
         # ----------------------------------------------------
 
         config_sh = (
-            runner_dir /
-            "config.sh"
+            runner_dir / "config.sh"
         )
 
-        if not config_sh.exists():
+        if config_sh.is_symlink():
 
             print(
-                "[ERROR] config.sh not found."
+                "[ERROR] config.sh must NOT be a symlink."
             )
 
             cleanup_runner(
@@ -759,7 +802,7 @@ def create_runner():
             return False
 
         # ----------------------------------------------------
-        # CONFIGURE
+        # REGISTER
         # ----------------------------------------------------
 
         config_command = [
@@ -823,18 +866,18 @@ def create_runner():
             return False
 
         # ----------------------------------------------------
-        # Verify .runner
+        # VERIFY
         # ----------------------------------------------------
 
         runner_config = (
-            runner_dir /
-            ".runner"
+            runner_dir / ".runner"
         )
 
-        if not runner_config.exists():
+        if not runner_config.is_file():
 
             print(
-                "[ERROR] .runner was not created."
+                "[ERROR] config.sh finished but "
+                ".runner was not created."
             )
 
             cleanup_runner(
@@ -847,12 +890,16 @@ def create_runner():
             return False
 
         print(
-            f"[RUNNER] {runner_name} registered."
+            f"[RUNNER] {runner_name} registered successfully."
         )
 
         # ----------------------------------------------------
         # START
         # ----------------------------------------------------
+
+        run_sh = (
+            runner_dir / "run.sh"
+        )
 
         process = subprocess.Popen(
             [
@@ -932,7 +979,7 @@ def create_runner():
     except subprocess.TimeoutExpired:
 
         print(
-            f"[ERROR] Runner configuration timeout: "
+            f"[ERROR] Configuration timeout: "
             f"{runner_name}"
         )
 
@@ -948,8 +995,7 @@ def create_runner():
     except OSError as e:
 
         print(
-            f"[ERROR] OS error for "
-            f"{runner_name}: {e}"
+            f"[ERROR] OS error: {e}"
         )
 
         cleanup_runner(
@@ -964,8 +1010,7 @@ def create_runner():
     except Exception as e:
 
         print(
-            f"[ERROR] Runner creation failed: "
-            f"{runner_name}: {e}"
+            f"[ERROR] Runner creation error: {e}"
         )
 
         cleanup_runner(
@@ -985,7 +1030,7 @@ def create_runner():
 
 
 # ============================================================
-# COUNTS
+# COUNTERS
 # ============================================================
 
 def local_runner_count():
@@ -1018,6 +1063,7 @@ def start_runner_creation():
             creating_runners >=
             MAX_CREATING
         ):
+
             return False
 
         creating_runners += 1
@@ -1031,7 +1077,7 @@ def start_runner_creation():
 
 
 # ============================================================
-# CLEAN STALE DIRS
+# REMOVE STALE DIRS
 # ============================================================
 
 def clean_stale_directories():
@@ -1138,7 +1184,7 @@ def ensure_target_count():
     )
 
     # --------------------------------------------------------
-    # Enough
+    # TARGET REACHED
     # --------------------------------------------------------
 
     if online >= TARGET_RUNNERS:
@@ -1150,7 +1196,7 @@ def ensure_target_count():
         return
 
     # --------------------------------------------------------
-    # Missing
+    # MISSING
     # --------------------------------------------------------
 
     missing = (
@@ -1159,7 +1205,7 @@ def ensure_target_count():
     )
 
     # --------------------------------------------------------
-    # Wait after failure
+    # BACKOFF
     # --------------------------------------------------------
 
     if last_failure_time:
@@ -1178,14 +1224,14 @@ def ensure_target_count():
 
             print(
                 f"[MANAGER] "
-                f"Creation backoff: "
+                f"Failure backoff: "
                 f"{remaining}s"
             )
 
             return
 
     # --------------------------------------------------------
-    # Don't over-create
+    # ACCOUNT FOR IN-FLIGHT CREATION
     # --------------------------------------------------------
 
     effective_missing = (
@@ -1196,7 +1242,7 @@ def ensure_target_count():
     if effective_missing <= 0:
 
         print(
-            "[MANAGER] Missing runners "
+            "[MANAGER] Required runners "
             "are already being created."
         )
 
@@ -1213,7 +1259,8 @@ def ensure_target_count():
     )
 
     print(
-        f"[MANAGER] Missing {missing} runner(s)."
+        f"[MANAGER] Missing "
+        f"{missing} runner(s)."
     )
 
     print(
@@ -1291,7 +1338,7 @@ print()
 
 
 # ============================================================
-# SOURCE TEST
+# SOURCE
 # ============================================================
 
 if not validate_source():
@@ -1300,7 +1347,7 @@ if not validate_source():
 
 
 # ============================================================
-# CLEANUP
+# CLEAN
 # ============================================================
 
 clean_stale_directories()
@@ -1309,7 +1356,7 @@ show_storage()
 
 
 # ============================================================
-# HEALTH SERVER
+# HEALTH
 # ============================================================
 
 health_server = (
@@ -1413,9 +1460,7 @@ for item in processes:
     if process:
 
         try:
-
             process.terminate()
-
         except Exception:
             pass
 
@@ -1423,9 +1468,7 @@ for item in processes:
 if health_server:
 
     try:
-
         health_server.shutdown()
-
     except Exception:
         pass
 
