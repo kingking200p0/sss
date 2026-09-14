@@ -7,6 +7,7 @@ RUN apt-get update \
        curl \
        jq \
        python3 \
+       python3-requests \
        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
