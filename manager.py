@@ -5,6 +5,7 @@ import shutil
 import signal
 import threading
 import subprocess
+
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,31 +24,21 @@ GITHUB_SCOPE = os.environ.get(
 )
 
 TARGET_RUNNERS = int(
-    os.environ.get(
-        "TARGET_RUNNERS",
-        "15",
-    )
+    os.environ.get("TARGET_RUNNERS", "15")
 )
 
 CHECK_INTERVAL = int(
-    os.environ.get(
-        "CHECK_INTERVAL",
-        "15",
-    )
+    os.environ.get("CHECK_INTERVAL", "15")
 )
 
+# IMPORTANT:
+# First test with ONE runner.
 MAX_CREATING = int(
-    os.environ.get(
-        "MAX_CREATING",
-        "3",
-    )
+    os.environ.get("MAX_CREATING", "1")
 )
 
 FAILURE_BACKOFF = int(
-    os.environ.get(
-        "FAILURE_BACKOFF",
-        "30",
-    )
+    os.environ.get("FAILURE_BACKOFF", "30")
 )
 
 RUNNER_LABELS = os.environ.get(
@@ -56,28 +47,25 @@ RUNNER_LABELS = os.environ.get(
 )
 
 PORT = int(
+    os.environ.get("PORT", "3000")
+)
+
+RUNNER_ARCHIVE = Path(
     os.environ.get(
-        "PORT",
-        "3000",
+        "RUNNER_ARCHIVE",
+        "/opt/actions-runner.tar.gz",
     )
 )
 
-
-# ============================================================
-# PATHS
-# ============================================================
-
 MANAGER_DIR = Path(
-    "/tmp/runner-manager"
+    os.environ.get(
+        "RUNNER_MANAGER_DIR",
+        "/tmp/runner-manager",
+    )
 )
 
 RUNNERS_DIR = (
-    MANAGER_DIR /
-    "runners"
-)
-
-SOURCE_DIR = Path(
-    "/opt/runner-source"
+    MANAGER_DIR / "runners"
 )
 
 
@@ -104,7 +92,7 @@ REGISTRATION_TOKEN_URL = (
 # STATE
 # ============================================================
 
-state_lock = threading.Lock()
+lock = threading.Lock()
 
 running_runners = {}
 
@@ -119,7 +107,7 @@ stop_event = threading.Event()
 # SIGNALS
 # ============================================================
 
-def shutdown_handler(signum, frame):
+def shutdown(signum, frame):
     print()
     print("[MANAGER] Shutdown requested...")
     stop_event.set()
@@ -127,17 +115,17 @@ def shutdown_handler(signum, frame):
 
 signal.signal(
     signal.SIGTERM,
-    shutdown_handler,
+    shutdown,
 )
 
 signal.signal(
     signal.SIGINT,
-    shutdown_handler,
+    shutdown,
 )
 
 
 # ============================================================
-# TOKEN
+# VALIDATION
 # ============================================================
 
 if not GITHUB_TOKEN:
@@ -145,12 +133,7 @@ if not GITHUB_TOKEN:
     raise SystemExit(1)
 
 
-# ============================================================
-# WRITABLE DIRECTORY
-# ============================================================
-
 try:
-
     MANAGER_DIR.mkdir(
         parents=True,
         exist_ok=True,
@@ -162,15 +145,17 @@ try:
     )
 
 except Exception as e:
-
     print(
-        "[ERROR] Cannot create runtime directory:"
+        f"[ERROR] Cannot create /tmp runtime: {e}"
     )
+    raise SystemExit(1)
 
+
+if not RUNNER_ARCHIVE.is_file():
     print(
-        f"        {e}"
+        f"[ERROR] Runner archive missing: "
+        f"{RUNNER_ARCHIVE}"
     )
-
     raise SystemExit(1)
 
 
@@ -188,7 +173,7 @@ class HealthHandler(
 
         self.send_header(
             "Content-Type",
-            "text/plain; charset=utf-8",
+            "text/plain",
         )
 
         self.end_headers()
@@ -197,11 +182,7 @@ class HealthHandler(
             b"OK\n"
         )
 
-    def log_message(
-        self,
-        format,
-        *args,
-    ):
+    def log_message(self, format, *args):
         return
 
 
@@ -225,7 +206,7 @@ def start_health_server():
         thread.start()
 
         print(
-            f"[HEALTH] Listening on port {PORT}"
+            f"[HEALTH] Listening on {PORT}"
         )
 
         return server
@@ -233,42 +214,37 @@ def start_health_server():
     except Exception as e:
 
         print(
-            f"[WARN] Health server failed: {e}"
+            f"[WARN] Health server error: {e}"
         )
 
         return None
 
 
 # ============================================================
-# GITHUB SESSION
+# GITHUB
 # ============================================================
 
 session = requests.Session()
 
 session.headers.update(
     {
-        "Authorization": (
-            f"Bearer {GITHUB_TOKEN}"
-        ),
-        "Accept": (
-            "application/vnd.github+json"
-        ),
-        "X-GitHub-Api-Version": (
-            "2026-03-10"
-        ),
+        "Authorization":
+            f"Bearer {GITHUB_TOKEN}",
+
+        "Accept":
+            "application/vnd.github+json",
+
+        "X-GitHub-Api-Version":
+            "2026-03-10",
     }
 )
 
-
-# ============================================================
-# GET ONLINE RUNNERS
-# ============================================================
 
 def get_online_runners():
 
     try:
 
-        response = session.get(
+        r = session.get(
             RUNNERS_URL,
             params={
                 "per_page": 100,
@@ -276,46 +252,41 @@ def get_online_runners():
             timeout=20,
         )
 
-        if response.status_code != 200:
+        if r.status_code != 200:
 
             print(
-                "[ERROR] GitHub runner list failed:"
+                f"[ERROR] GitHub API: "
+                f"{r.status_code}"
             )
 
             print(
-                f"        HTTP {response.status_code}"
-            )
-
-            print(
-                response.text[:500]
+                r.text[:500]
             )
 
             return None
 
-        data = response.json()
+        data = r.json()
 
         runners = data.get(
             "runners",
-            [],
+            []
         )
 
         online = [
-            runner
-            for runner in runners
-            if runner.get("status") == "online"
+            x for x in runners
+            if x.get("status") == "online"
         ]
 
         busy = [
-            runner
-            for runner in online
-            if runner.get("busy") is True
+            x for x in online
+            if x.get("busy") is True
         ]
 
         print(
             f"[GITHUB] "
-            f"Registered: {len(runners)} | "
-            f"Online: {len(online)} | "
-            f"Busy: {len(busy)}"
+            f"Registered={len(runners)} "
+            f"Online={len(online)} "
+            f"Busy={len(busy)}"
         )
 
         return len(online)
@@ -323,159 +294,88 @@ def get_online_runners():
     except Exception as e:
 
         print(
-            f"[ERROR] get_online_runners(): {e}"
+            f"[ERROR] Runner list: {e}"
         )
 
         return None
 
-
-# ============================================================
-# REGISTRATION TOKEN
-# ============================================================
 
 def get_registration_token():
 
     try:
 
-        response = session.post(
+        r = session.post(
             REGISTRATION_TOKEN_URL,
             timeout=20,
         )
 
-        if response.status_code not in (
+        if r.status_code not in (
             200,
             201,
         ):
 
             print(
-                "[ERROR] Registration token failed:"
+                f"[ERROR] Token HTTP "
+                f"{r.status_code}"
             )
 
             print(
-                f"        HTTP {response.status_code}"
-            )
-
-            print(
-                response.text[:500]
+                r.text[:500]
             )
 
             return None
 
-        data = response.json()
-
-        token = data.get(
+        return r.json().get(
             "token"
         )
-
-        if not token:
-
-            print(
-                "[ERROR] No registration token returned."
-            )
-
-            return None
-
-        return token
 
     except Exception as e:
 
         print(
-            f"[ERROR] get_registration_token(): {e}"
+            f"[ERROR] Token request: {e}"
         )
 
         return None
 
 
 # ============================================================
-# SOURCE VALIDATION
+# STORAGE
 # ============================================================
 
-def validate_source():
+def show_storage():
 
-    required_dirs = [
-        "bin",
-        "externals",
-    ]
+    try:
 
-    required_files = [
-        "config.sh",
-        "run.sh",
-        "env.sh",
-    ]
-
-    print(
-        "[MANAGER] Checking runner source..."
-    )
-
-    if not SOURCE_DIR.exists():
+        u = shutil.disk_usage(
+            MANAGER_DIR
+        )
 
         print(
-            f"[ERROR] Missing source: {SOURCE_DIR}"
+            "[STORAGE] "
+            f"Used={u.used / 1024**3:.3f}GB "
+            f"Free={u.free / 1024**3:.3f}GB "
+            f"Total={u.total / 1024**3:.3f}GB"
         )
 
-        return False
+    except Exception as e:
 
-    for name in required_dirs:
-
-        path = (
-            SOURCE_DIR /
-            name
+        print(
+            f"[STORAGE] {e}"
         )
-
-        if not path.is_dir():
-
-            print(
-                f"[ERROR] Missing directory: {path}"
-            )
-
-            return False
-
-    for name in required_files:
-
-        path = (
-            SOURCE_DIR /
-            name
-        )
-
-        if not path.is_file():
-
-            print(
-                f"[ERROR] Missing file: {path}"
-            )
-
-            return False
-
-    print(
-        "[MANAGER] Runner source OK."
-    )
-
-    return True
 
 
 # ============================================================
-# CREATE RUNNER FILESYSTEM
+# CREATE REAL INSTALLATION
 # ============================================================
 
-def create_runner_tree(
-    runner_dir: Path,
+def extract_runner(
+    runner_dir: Path
 ):
 
-    """
-    Structure:
-
-        runner_dir/
-            config.sh       <- REAL LOCAL FILE
-            run.sh          <- REAL LOCAL FILE
-            env.sh          <- REAL LOCAL FILE
-            ...
-            bin/            -> /opt/runner-source/bin
-            externals/      -> /opt/runner-source/externals
-
-    This is intentional.
-
-    config.sh and run.sh MUST be real local files because
-    they calculate their own installation directory.
-    """
+    print(
+        "[RUNNER] Extracting REAL runner "
+        "installation..."
+    )
 
     try:
 
@@ -484,118 +384,138 @@ def create_runner_tree(
             exist_ok=False,
         )
 
-        # ----------------------------------------------------
-        # Copy every TOP-LEVEL regular file locally.
-        #
-        # These are usually tiny compared with bin/externals.
-        # ----------------------------------------------------
-
-        for item in SOURCE_DIR.iterdir():
-
-            name = item.name
-
-            if name in (
-                "bin",
-                "externals",
-            ):
-                continue
-
-            destination = (
-                runner_dir /
-                name
-            )
-
-            if item.is_file():
-
-                shutil.copy2(
-                    item,
-                    destination,
-                )
-
-        # ----------------------------------------------------
-        # Link huge immutable directories.
-        # ----------------------------------------------------
-
-        for name in (
-            "bin",
-            "externals",
-        ):
-
-            source = (
-                SOURCE_DIR /
-                name
-            )
-
-            destination = (
-                runner_dir /
-                name
-            )
-
-            os.symlink(
-                str(source),
-                str(destination),
-                target_is_directory=True,
-            )
-
-        # ----------------------------------------------------
-        # Runner-specific writable directories.
-        # ----------------------------------------------------
-
-        for name in (
-            "_work",
-            "_diag",
-            "_temp",
-            "_tool_cache",
-            "home",
-        ):
-
-            (
-                runner_dir /
-                name
-            ).mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-        # ----------------------------------------------------
-        # HOME directories.
-        # ----------------------------------------------------
-
-        home = (
-            runner_dir /
-            "home"
+        result = subprocess.run(
+            [
+                "tar",
+                "-xzf",
+                str(RUNNER_ARCHIVE),
+                "-C",
+                str(runner_dir),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=180,
         )
 
-        for relative in (
-            ".cache",
-            ".config",
-            ".local",
-            ".local/share",
-        ):
+        if result.returncode != 0:
 
-            (
-                home /
-                relative
-            ).mkdir(
-                parents=True,
-                exist_ok=True,
+            print(
+                "[ERROR] tar extraction failed:"
             )
+
+            print(
+                result.stdout
+            )
+
+            return False
+
+        # ----------------------------------------------------
+        # Critical verification
+        # ----------------------------------------------------
+
+        listener_dll = (
+            runner_dir /
+            "bin" /
+            "Runner.Listener.dll"
+        )
+
+        listener = (
+            runner_dir /
+            "bin" /
+            "Runner.Listener"
+        )
+
+        config = (
+            runner_dir /
+            "config.sh"
+        )
+
+        run = (
+            runner_dir /
+            "run.sh"
+        )
+
+        print(
+            "[RUNNER] Verification:"
+        )
+
+        print(
+            f"        Root:     {runner_dir}"
+        )
+
+        print(
+            f"        Config:   {config}"
+        )
+
+        print(
+            f"        Listener: {listener}"
+        )
+
+        print(
+            f"        DLL:      {listener_dll}"
+        )
+
+        if not config.is_file():
+            print(
+                "[ERROR] config.sh missing"
+            )
+            return False
+
+        if not run.is_file():
+            print(
+                "[ERROR] run.sh missing"
+            )
+            return False
+
+        if not listener.is_file():
+            print(
+                "[ERROR] Runner.Listener missing"
+            )
+            return False
+
+        if not listener_dll.is_file():
+            print(
+                "[ERROR] Runner.Listener.dll missing"
+            )
+            return False
+
+        # ----------------------------------------------------
+        # Show REAL PATHS
+        # ----------------------------------------------------
+
+        print(
+            "[RUNNER] REAL PATHS:"
+        )
+
+        print(
+            subprocess.run(
+                [
+                    "realpath",
+                    str(config),
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
+
+        print(
+            subprocess.run(
+                [
+                    "realpath",
+                    str(listener_dll),
+                ],
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        )
 
         return True
 
     except Exception as e:
 
         print(
-            "[ERROR] Could not create runner tree:"
-        )
-
-        print(
-            f"        {e}"
-        )
-
-        shutil.rmtree(
-            runner_dir,
-            ignore_errors=True,
+            f"[ERROR] Extraction error: {e}"
         )
 
         return False
@@ -605,13 +525,13 @@ def create_runner_tree(
 # ENVIRONMENT
 # ============================================================
 
-def runner_environment(
-    runner_dir: Path,
+def runner_env(
+    runner_dir: Path
 ):
 
     home = (
         runner_dir /
-        "home"
+        "_home"
     )
 
     temp = (
@@ -624,27 +544,29 @@ def runner_environment(
         "_tool_cache"
     )
 
+    home.mkdir(
+        exist_ok=True
+    )
+
+    temp.mkdir(
+        exist_ok=True
+    )
+
+    tool_cache.mkdir(
+        exist_ok=True
+    )
+
     env = os.environ.copy()
 
-    env["HOME"] = str(
-        home
-    )
+    env["HOME"] = str(home)
 
-    env["TMPDIR"] = str(
-        temp
-    )
+    env["TMPDIR"] = str(temp)
 
-    env["TMP"] = str(
-        temp
-    )
+    env["TMP"] = str(temp)
 
-    env["TEMP"] = str(
-        temp
-    )
+    env["TEMP"] = str(temp)
 
-    env["RUNNER_TEMP"] = str(
-        temp
-    )
+    env["RUNNER_TEMP"] = str(temp)
 
     env["RUNNER_TOOL_CACHE"] = str(
         tool_cache
@@ -654,45 +576,29 @@ def runner_environment(
         tool_cache
     )
 
-    env["XDG_CACHE_HOME"] = str(
-        home /
-        ".cache"
-    )
-
-    env["XDG_CONFIG_HOME"] = str(
-        home /
-        ".config"
-    )
-
-    env["XDG_DATA_HOME"] = str(
-        home /
-        ".local" /
-        "share"
-    )
-
     return env
 
 
 # ============================================================
-# CLEAN RUNNER
+# CLEANUP
 # ============================================================
 
-def cleanup_runner(
-    runner_name,
-    runner_dir,
+def cleanup(
+    name,
+    path,
 ):
 
-    with state_lock:
+    with lock:
 
         running_runners.pop(
-            runner_name,
+            name,
             None,
         )
 
     try:
 
         shutil.rmtree(
-            runner_dir,
+            path,
             ignore_errors=True,
         )
 
@@ -700,7 +606,7 @@ def cleanup_runner(
         pass
 
     print(
-        f"[RUNNER] {runner_name} cleaned."
+        f"[RUNNER] {name} cleaned."
     )
 
 
@@ -713,15 +619,14 @@ def create_runner():
     global creating_runners
     global last_failure_time
 
-    runner_id = uuid.uuid4().hex[:12]
-
-    runner_name = (
-        f"deplexo-{runner_id}"
+    name = (
+        "deplexo-" +
+        uuid.uuid4().hex[:12]
     )
 
     runner_dir = (
         RUNNERS_DIR /
-        runner_name
+        name
     )
 
     print()
@@ -734,7 +639,7 @@ def create_runner():
     )
 
     print(
-        f"[RUNNER] Name: {runner_name}"
+        f"[RUNNER] Name: {name}"
     )
 
     print(
@@ -751,10 +656,6 @@ def create_runner():
 
     try:
 
-        # ----------------------------------------------------
-        # TOKEN
-        # ----------------------------------------------------
-
         token = (
             get_registration_token()
         )
@@ -765,71 +666,62 @@ def create_runner():
 
             return False
 
-        # ----------------------------------------------------
-        # FILESYSTEM
-        # ----------------------------------------------------
-
-        print(
-            "[RUNNER] Creating runner filesystem..."
-        )
-
-        if not create_runner_tree(
+        if not extract_runner(
             runner_dir
         ):
+
+            cleanup(
+                name,
+                runner_dir,
+            )
 
             last_failure_time = time.time()
 
             return False
 
-        env = (
-            runner_environment(
-                runner_dir
-            )
+        env = runner_env(
+            runner_dir
+        )
+
+        config = (
+            runner_dir /
+            "config.sh"
         )
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # DO NOT:
-        #
-        # subprocess.run(["./config.sh"])
-        #
-        # Use bash explicitly because /tmp may be noexec.
+        # Registration
         # ----------------------------------------------------
 
-        config_command = [
-            "bash",
-            "./config.sh",
-
-            "--url",
-            f"https://github.com/{GITHUB_SCOPE}",
-
-            "--token",
-            token,
-
-            "--name",
-            runner_name,
-
-            "--labels",
-            RUNNER_LABELS,
-
-            "--work",
-            "_work",
-
-            "--ephemeral",
-
-            "--disableupdate",
-
-            "--unattended",
-        ]
-
         print(
-            f"[RUNNER] Registering "
-            f"{runner_name}..."
+            f"[RUNNER] Registering {name}..."
         )
 
         result = subprocess.run(
-            config_command,
+            [
+                "bash",
+                str(config),
+
+                "--url",
+                f"https://github.com/{GITHUB_SCOPE}",
+
+                "--token",
+                token,
+
+                "--name",
+                name,
+
+                "--labels",
+                RUNNER_LABELS,
+
+                "--work",
+                "_work",
+
+                "--ephemeral",
+
+                "--disableupdate",
+
+                "--unattended",
+            ],
             cwd=runner_dir,
             env=env,
             stdout=subprocess.PIPE,
@@ -838,29 +730,20 @@ def create_runner():
             timeout=180,
         )
 
-        output = (
+        print(
             result.stdout or ""
         )
-
-        print(output)
-
-        # ----------------------------------------------------
-        # REGISTRATION FAILURE
-        # ----------------------------------------------------
 
         if result.returncode != 0:
 
             print(
-                "[ERROR] Runner registration failed."
-            )
-
-            print(
-                f"[ERROR] Exit code: "
+                f"[ERROR] Registration failed "
+                f"with exit code "
                 f"{result.returncode}"
             )
 
-            cleanup_runner(
-                runner_name,
+            cleanup(
+                name,
                 runner_dir,
             )
 
@@ -869,22 +752,20 @@ def create_runner():
             return False
 
         # ----------------------------------------------------
-        # VERIFY
+        # VERIFY CONFIG
         # ----------------------------------------------------
 
-        runner_config = (
+        if not (
             runner_dir /
             ".runner"
-        )
-
-        if not runner_config.exists():
+        ).is_file():
 
             print(
-                "[ERROR] .runner was not created."
+                "[ERROR] .runner missing"
             )
 
-            cleanup_runner(
-                runner_name,
+            cleanup(
+                name,
                 runner_dir,
             )
 
@@ -892,26 +773,21 @@ def create_runner():
 
             return False
 
-        print()
         print(
-            f"[RUNNER] "
-            f"{runner_name} registered successfully."
+            f"[RUNNER] {name} registered successfully."
         )
 
         # ----------------------------------------------------
-        # START RUNNER
-        #
-        # IMPORTANT:
-        #
-        # bash ./run.sh
-        #
-        # instead of directly executing ./run.sh
+        # START
         # ----------------------------------------------------
 
         process = subprocess.Popen(
             [
                 "bash",
-                "./run.sh",
+                str(
+                    runner_dir /
+                    "run.sh"
+                ),
             ],
             cwd=runner_dir,
             env=env,
@@ -921,19 +797,17 @@ def create_runner():
             bufsize=1,
         )
 
-        with state_lock:
+        with lock:
 
             running_runners[
-                runner_name
+                name
             ] = {
                 "process": process,
                 "directory": runner_dir,
-                "started": time.time(),
             }
 
         print(
-            f"[RUNNER] "
-            f"{runner_name} started."
+            f"[RUNNER] {name} started."
         )
 
         # ----------------------------------------------------
@@ -948,14 +822,12 @@ def create_runner():
 
                     for line in process.stdout:
 
-                        line = (
-                            line.rstrip()
-                        )
+                        line = line.rstrip()
 
                         if line:
 
                             print(
-                                f"[{runner_name}] "
+                                f"[{name}] "
                                 f"{line}"
                             )
 
@@ -964,20 +836,19 @@ def create_runner():
             except Exception as e:
 
                 print(
-                    f"[ERROR] "
-                    f"Monitor {runner_name}: "
-                    f"{e}"
+                    f"[ERROR] Monitor "
+                    f"{name}: {e}"
                 )
 
             finally:
 
                 print(
                     f"[RUNNER] "
-                    f"{runner_name} stopped."
+                    f"{name} stopped."
                 )
 
-                cleanup_runner(
-                    runner_name,
+                cleanup(
+                    name,
                     runner_dir,
                 )
 
@@ -988,47 +859,14 @@ def create_runner():
 
         return True
 
-    except subprocess.TimeoutExpired:
-
-        print(
-            f"[ERROR] "
-            f"Configuration timeout: "
-            f"{runner_name}"
-        )
-
-        cleanup_runner(
-            runner_name,
-            runner_dir,
-        )
-
-        last_failure_time = time.time()
-
-        return False
-
-    except OSError as e:
-
-        print(
-            f"[ERROR] OS error: {e}"
-        )
-
-        cleanup_runner(
-            runner_name,
-            runner_dir,
-        )
-
-        last_failure_time = time.time()
-
-        return False
-
     except Exception as e:
 
         print(
-            f"[ERROR] Runner creation error: "
-            f"{e}"
+            f"[ERROR] create_runner: {e}"
         )
 
-        cleanup_runner(
-            runner_name,
+        cleanup(
+            name,
             runner_dir,
         )
 
@@ -1038,146 +876,42 @@ def create_runner():
 
     finally:
 
-        with state_lock:
+        with lock:
 
             creating_runners -= 1
-
-
-# ============================================================
-# COUNTS
-# ============================================================
-
-def local_runner_count():
-
-    with state_lock:
-
-        return len(
-            running_runners
-        )
-
-
-def creating_runner_count():
-
-    with state_lock:
-
-        return creating_runners
 
 
 # ============================================================
 # START CREATION
 # ============================================================
 
-def start_runner_creation():
+def start_creation():
 
     global creating_runners
 
-    with state_lock:
+    with lock:
 
         if (
             creating_runners >=
             MAX_CREATING
         ):
-
             return False
 
         creating_runners += 1
 
-    thread = threading.Thread(
+    threading.Thread(
         target=create_runner,
         daemon=True,
-    )
-
-    thread.start()
+    ).start()
 
     return True
 
 
 # ============================================================
-# CLEAN STALE DIRECTORIES
+# RECONCILE
 # ============================================================
 
-def clean_stale_directories():
-
-    try:
-
-        with state_lock:
-
-            active = set(
-                running_runners.keys()
-            )
-
-        for path in RUNNERS_DIR.iterdir():
-
-            if not path.is_dir():
-                continue
-
-            if path.name in active:
-                continue
-
-            shutil.rmtree(
-                path,
-                ignore_errors=True,
-            )
-
-    except Exception as e:
-
-        print(
-            f"[WARN] Cleanup error: {e}"
-        )
-
-
-# ============================================================
-# STORAGE
-# ============================================================
-
-def show_storage():
-
-    try:
-
-        usage = shutil.disk_usage(
-            MANAGER_DIR
-        )
-
-        used = (
-            usage.used /
-            1024 /
-            1024 /
-            1024
-        )
-
-        free = (
-            usage.free /
-            1024 /
-            1024 /
-            1024
-        )
-
-        total = (
-            usage.total /
-            1024 /
-            1024 /
-            1024
-        )
-
-        print(
-            f"[STORAGE] "
-            f"Used={used:.2f}GB | "
-            f"Free={free:.2f}GB | "
-            f"Total={total:.2f}GB"
-        )
-
-    except Exception as e:
-
-        print(
-            f"[STORAGE] {e}"
-        )
-
-
-# ============================================================
-# RECONCILIATION
-# ============================================================
-
-def ensure_target_count():
+def reconcile():
 
     global last_failure_time
 
@@ -1186,28 +920,25 @@ def ensure_target_count():
     )
 
     if online is None:
-
         return
 
-    local = (
-        local_runner_count()
-    )
+    with lock:
 
-    creating = (
-        creating_runner_count()
+        creating = (
+            creating_runners
+        )
+
+    local = (
+        len(running_runners)
     )
 
     print(
         f"[MANAGER] "
-        f"GitHub online={online} | "
-        f"local={local} | "
-        f"creating={creating} | "
+        f"GitHub online={online} "
+        f"local={local} "
+        f"creating={creating} "
         f"target={TARGET_RUNNERS}"
     )
-
-    # --------------------------------------------------------
-    # TARGET REACHED
-    # --------------------------------------------------------
 
     if online >= TARGET_RUNNERS:
 
@@ -1217,18 +948,10 @@ def ensure_target_count():
 
         return
 
-    # --------------------------------------------------------
-    # MISSING
-    # --------------------------------------------------------
-
     missing = (
         TARGET_RUNNERS -
         online
     )
-
-    # --------------------------------------------------------
-    # FAILURE BACKOFF
-    # --------------------------------------------------------
 
     if last_failure_time:
 
@@ -1239,22 +962,13 @@ def ensure_target_count():
 
         if elapsed < FAILURE_BACKOFF:
 
-            remaining = int(
-                FAILURE_BACKOFF -
-                elapsed
-            )
-
             print(
                 f"[MANAGER] "
                 f"Failure backoff: "
-                f"{remaining}s"
+                f"{int(FAILURE_BACKOFF - elapsed)}s"
             )
 
             return
-
-    # --------------------------------------------------------
-    # ALREADY CREATING
-    # --------------------------------------------------------
 
     effective_missing = (
         missing -
@@ -1262,47 +976,30 @@ def ensure_target_count():
     )
 
     if effective_missing <= 0:
-
-        print(
-            "[MANAGER] Required runners "
-            "are already being created."
-        )
-
         return
-
-    # --------------------------------------------------------
-    # LIMIT
-    # --------------------------------------------------------
 
     available = (
         MAX_CREATING -
         creating
     )
 
-    create_count = min(
+    count = min(
         effective_missing,
         available,
     )
 
     print(
-        f"[MANAGER] Missing "
-        f"{missing} runner(s)."
-    )
-
-    print(
         f"[MANAGER] Starting "
-        f"{create_count} creation(s)."
+        f"{count} runner creation(s)."
     )
 
-    for _ in range(
-        create_count
-    ):
+    for _ in range(count):
 
         if stop_event.is_set():
-            break
+            return
 
-        if not start_runner_creation():
-            break
+        if not start_creation():
+            return
 
         time.sleep(2)
 
@@ -1345,15 +1042,11 @@ print(
 )
 
 print(
-    f"Labels       : {RUNNER_LABELS}"
-)
-
-print(
     f"Runtime      : {MANAGER_DIR}"
 )
 
 print(
-    f"Source       : {SOURCE_DIR}"
+    f"Archive      : {RUNNER_ARCHIVE}"
 )
 
 print(
@@ -1363,65 +1056,17 @@ print(
 print()
 
 
-# ============================================================
-# VALIDATE
-# ============================================================
-
-if not validate_source():
-
-    raise SystemExit(1)
-
-
-# ============================================================
-# CLEAN OLD FILES
-# ============================================================
-
-clean_stale_directories()
-
-show_storage()
-
-
-# ============================================================
-# HEALTH
-# ============================================================
-
 health_server = (
     start_health_server()
 )
 
-
-# ============================================================
-# INITIAL CHECK
-# ============================================================
+show_storage()
 
 print(
     "[MANAGER] Initial GitHub check..."
 )
 
-initial_online = (
-    get_online_runners()
-)
-
-if initial_online is not None:
-
-    print(
-        f"[MANAGER] Initial online: "
-        f"{initial_online}"
-    )
-
-    if initial_online < TARGET_RUNNERS:
-
-        print(
-            f"[MANAGER] Need "
-            f"{TARGET_RUNNERS - initial_online} "
-            f"runner(s)."
-        )
-
-    else:
-
-        print(
-            "[MANAGER] Target already reached."
-        )
+get_online_runners()
 
 
 # ============================================================
@@ -1432,22 +1077,7 @@ while not stop_event.is_set():
 
     try:
 
-        print()
-        print(
-            "=========================================="
-        )
-
-        print(
-            "[MANAGER] Checking runner count..."
-        )
-
-        print(
-            "=========================================="
-        )
-
-        clean_stale_directories()
-
-        ensure_target_count()
+        reconcile()
 
         show_storage()
 
@@ -1470,12 +1100,11 @@ print(
     "[MANAGER] Stopping..."
 )
 
-with state_lock:
+with lock:
 
     processes = list(
         running_runners.values()
     )
-
 
 for item in processes:
 
@@ -1486,9 +1115,7 @@ for item in processes:
     if process:
 
         try:
-
             process.terminate()
-
         except Exception:
             pass
 
@@ -1496,9 +1123,7 @@ for item in processes:
 if health_server:
 
     try:
-
         health_server.shutdown()
-
     except Exception:
         pass
 
