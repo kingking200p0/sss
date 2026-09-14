@@ -13,13 +13,11 @@ RUN apt-get update \
 
 COPY manager.py /manager.py
 
-RUN chmod +x /manager.py \
-    && mkdir -p /runner-manager \
-    && chown -R runner:runner /runner-manager
+RUN chmod +x /manager.py
 
 USER runner
 
-WORKDIR /runner-manager
+WORKDIR /tmp
 
 ENV PYTHONUNBUFFERED=1
 
