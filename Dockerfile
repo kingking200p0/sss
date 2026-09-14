@@ -3,15 +3,23 @@ FROM ghcr.io/actions/actions-runner:latest
 USER root
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl jq ca-certificates \
+    && apt-get install -y --no-install-recommends \
+       curl \
+       jq \
+       python3 \
+       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --chown=runner:runner entrypoint.sh /home/runner/entrypoint.sh
+COPY manager.py /manager.py
 
-RUN chmod +x /home/runner/entrypoint.sh
+RUN chmod +x /manager.py \
+    && mkdir -p /runner-manager \
+    && chown -R runner:runner /runner-manager
 
 USER runner
 
-WORKDIR /home/runner
+WORKDIR /runner-manager
 
-ENTRYPOINT ["/home/runner/entrypoint.sh"]
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python3", "/manager.py"]
