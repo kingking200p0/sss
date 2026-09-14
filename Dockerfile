@@ -10,44 +10,37 @@ RUN apt-get update \
         curl \
         jq \
         coreutils \
-        rsync \
+        util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # ------------------------------------------------------------
-# Runner source
-# ------------------------------------------------------------
-# The original /home/runner installation is part of the image
-# and is never used as a writable runner instance.
+# Keep the official runner installation as a READ-ONLY source.
 #
-# We keep it as a source tree and create the writable runtime
-# tree at startup.
+# Deplexo may mount the container filesystem read-only at runtime,
+# so no runtime files will ever be created here.
 # ------------------------------------------------------------
 
 RUN mkdir -p /opt/runner-source \
     && cp -a /home/runner/. /opt/runner-source/ \
+    && chown -R runner:runner /opt/runner-source \
     && chmod -R a+rX /opt/runner-source
 
 # ------------------------------------------------------------
-# Writable manager directory
+# Manager
 # ------------------------------------------------------------
-
-RUN mkdir -p /runner-manager \
-    && chown -R runner:runner /runner-manager
 
 COPY manager.py /manager.py
 
 RUN chmod +x /manager.py \
     && chown runner:runner /manager.py
 
-# ------------------------------------------------------------
-# Run as non-root
-# ------------------------------------------------------------
-
 USER runner
 
-WORKDIR /runner-manager
-
+# IMPORTANT:
+# Runtime writable directory is /tmp.
+ENV RUNNER_MANAGER_DIR=/tmp/runner-manager
 ENV PYTHONUNBUFFERED=1
-ENV RUNNER_MANAGER_DIR=/runner-manager
+
+WORKDIR /tmp
 
 ENTRYPOINT ["python3", "/manager.py"]
